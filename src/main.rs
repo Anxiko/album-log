@@ -136,6 +136,14 @@ fn process_file(path: &str) -> anyhow::Result<()> {
 		.sorted_by_key(|(album, freq)| (Reverse(*freq), album.clone()))
 		.collect_vec();
 
+	let total_listenings: u32 = album_freq.iter().map(|(_album, freq)| *freq).sum();
+	let total_count = album_freq.len() as u32;
+
+	let mut digits = total_count.ilog10();
+	if 10u32.pow(digits) < total_count {
+		digits += 1;
+	}
+
 	album_freq
 		.into_iter()
 		.scan(None, |maybe_rank: &mut Option<(u32, u32)>, (album, freq)| {
@@ -153,10 +161,12 @@ fn process_file(path: &str) -> anyhow::Result<()> {
 				};
 			Some((album_rank, (album, freq)))
 		})
-		.for_each(|(rank, (album, freq))| {
+		.enumerate()
+		.for_each(|(idx, (rank, (album, freq)))| {
 			let album_entry = AlbumEntry::new(album, freq);
-			println!("{rank}. {album_entry}");
+			println!("#{:0width$} {rank}. {album_entry}", idx + 1, width = digits as usize);
 		});
+	println!("{total_count} albums listed, {total_listenings} albums listened");
 
 	Ok(())
 }
