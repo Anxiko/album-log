@@ -10,7 +10,7 @@ use std::ops::{AddAssign};
 use std::str::FromStr;
 use std::sync::LazyLock;
 
-static DATE_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^→\s*(.*?)$\s*").unwrap());
+static DATE_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*→\s*(.*?)\s*$").unwrap());
 static ALBUM_ENTRY_PATTERN: LazyLock<Regex> =
 	LazyLock::new(|| Regex::new(r"^\s*(.+?)\s*(?:\((\d+)x\))?$").unwrap());
 const TOP_RANK: usize = 20usize;
@@ -168,7 +168,7 @@ fn process_file(path: &str) -> anyhow::Result<()> {
 	let total_listenings: u32 = album_freq.iter().map(|(_album, freq)| *freq).sum();
 	let total_count = album_freq.len() as u32;
 
-	let mut digits = total_count.ilog10();
+	let mut digits = if total_count > 0 { total_count.ilog10() } else { 0 };
 	if 10u32.pow(digits) < total_count {
 		digits += 1;
 	}
