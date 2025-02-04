@@ -2,10 +2,10 @@ use itertools::Itertools;
 use regex::Regex;
 use std::cmp::Reverse;
 use std::collections::HashMap;
-use std::env;
+use std::{env, io};
 use std::fmt::{Display, Formatter};
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::ops::{AddAssign};
 use std::str::FromStr;
 use std::sync::LazyLock;
@@ -13,6 +13,7 @@ use std::sync::LazyLock;
 static DATE_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^→\s*(.*?)$\s*").unwrap());
 static ALBUM_ENTRY_PATTERN: LazyLock<Regex> =
 	LazyLock::new(|| Regex::new(r"^\s*(.+?)\s*(?:\((\d+)x\))?$").unwrap());
+const TOP_RANK: usize = 20usize;
 
 #[derive(Debug)]
 struct AlbumEntry {
@@ -95,6 +96,18 @@ impl AlbumLog {
 	}
 }
 
+struct RankingEntry {
+	idx: usize,
+	rank: u32,
+	album_entry: AlbumEntry,
+}
+
+impl RankingEntry {
+	fn print_entry(&self, width: usize) {
+		println!("#{:0width$} {}. {}", self.idx + 1, self.rank, self.album_entry, width = width);
+	}
+}
+
 fn main() -> anyhow::Result<()> {
 	match &env::args().collect_vec()[..] {
 		[_name, file] => process_file(file),
@@ -103,6 +116,22 @@ fn main() -> anyhow::Result<()> {
 			Ok(())
 		}
 		_ => unreachable!(),
+	}
+}
+
+fn prompt() -> Option<bool> {
+	print!("See all? [Y/n]: ");
+	io::stdout().flush().expect("Flush STDOUT");
+	let mut response = String::new();
+
+	io::stdin()
+		.read_line(&mut response)
+		.expect("Read from STDIN");
+
+	match response.trim().to_ascii_lowercase().as_str() {
+		"y" | "" => Some(true),
+		"n" => Some(false),
+		_ => None,
 	}
 }
 
@@ -144,29 +173,46 @@ fn process_file(path: &str) -> anyhow::Result<()> {
 		digits += 1;
 	}
 
-	album_freq
-		.into_iter()
-		.scan(None, |maybe_rank: &mut Option<(u32, u32)>, (album, freq)| {
-			let album_rank =
-				if let Some((rank, rank_freq)) = *maybe_rank {
-					if freq != rank_freq {
-						*maybe_rank = Some((rank + 1, freq));
-						rank + 1
+	let ranking_entries =
+		album_freq
+			.into_iter()
+			.scan(None, |maybe_rank: &mut Option<(u32, u32)>, (album, freq)| {
+				let album_rank =
+					if let Some((rank, rank_freq)) = *maybe_rank {
+						if freq != rank_freq {
+							*maybe_rank = Some((rank + 1, freq));
+							rank + 1
+						} else {
+							rank
+						}
 					} else {
-						rank
-					}
-				} else {
-					*maybe_rank = Some((1, freq));
-					1
-				};
-			Some((album_rank, (album, freq)))
-		})
-		.enumerate()
-		.for_each(|(idx, (rank, (album, freq)))| {
-			let album_entry = AlbumEntry::new(album, freq);
-			println!("#{:0width$} {rank}. {album_entry}", idx + 1, width = digits as usize);
-		});
+						*maybe_rank = Some((1, freq));
+						1
+					};
+				Some((album_rank, (album, freq)))
+			})
+			.enumerate()
+			.map(|(idx, (rank, (album, freq)))| {
+				RankingEntry { idx, rank, album_entry: AlbumEntry::new(album, freq) }
+			})
+			.collect_vec();
+
+	let mut iter = ranking_entries.into_iter().peekable();
+
+	iter
+		.by_ref()
+		.take(TOP_RANK)
+		.for_each(|entry| entry.print_entry(digits as usize));
 	println!("{total_count} albums listed, {total_listenings} albums listened");
+
+	if iter.peek().is_some() {
+		let response = loop {
+			if let Some(response) = prompt() { break response; }
+		};
+		if response {
+			iter.for_each(|entry| entry.print_entry(digits as usize));
+		}
+	}
 
 	Ok(())
 }
