@@ -1,0 +1,60 @@
+name: Rust Release Workflow
+
+on:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [ x86_64-pc-windows-gnu ]
+
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Check for version bump
+        id: version-check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Extract the current version in Cargo.toml
+          version=$(grep '^version' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "Detected version: $version"
+          echo "version=$version" >> $GITHUB_OUTPUT
+
+          # Check if the version exists as a GitHub release
+          if gh release view "v$version" &>/dev/null; then
+            echo "Version $version already released."
+            exit 1
+          fi
+          
+          git tag "v$version"
+
+      - name: Compile rust binary
+        id: build
+        uses: rust-build/rust-build.action@v1.4.5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          RUSTTARGET: ${{ matrix.target }}
+          TOOLCHAIN_VERSION: "1.84.0"
+          UPLOAD_MODE: none
+
+
+      - name: Create a release
+        id: create-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{steps.version-check.outputs.version}}"
+          files: |
+            ${{ steps.build.outputs.BUILT_ARCHIVE }}            
+            ${{ steps.build.outputs.BUILT_CHECKSUM }}
