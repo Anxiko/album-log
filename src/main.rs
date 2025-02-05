@@ -1,10 +1,11 @@
 use itertools::Itertools;
 use regex::Regex;
-use std::cmp::Reverse;
+use std::cmp::{Ordering, Reverse};
 use std::collections::HashMap;
 use std::{env, io};
 use std::fmt::{Display, Formatter};
 use std::fs::File;
+use std::hash::Hash;
 use std::io::{BufRead, BufReader, Write};
 use std::ops::{AddAssign};
 use std::str::FromStr;
@@ -13,28 +14,13 @@ use std::sync::LazyLock;
 static DATE_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*→\s*(.*?)\s*$").unwrap());
 static ALBUM_ENTRY_PATTERN: LazyLock<Regex> =
 	LazyLock::new(|| Regex::new(r"^\s*(.+?)\s*(?:\((\d+)x\))?$").unwrap());
-const TOP_RANK: usize = 20usize;
-
-#[derive(Debug)]
-struct AlbumEntry {
-	value: String,
-	freq: u32,
-}
-
-impl Display for AlbumEntry {
-	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-		write!(f, "{} (x{})", self.value, self.freq)
-	}
-}
-
-impl AlbumEntry {
-	fn new(value: String, freq: u32) -> Self {
-		Self { value, freq }
-	}
-}
+const TOP_ALBUMS: usize = 20usize;
+const TOP_ARTISTS: usize = 10usize;
+const ENTRY_SEPARATOR: char = '–';
+const ARTIST_JOINER: char = '/';
 
 enum ParsedLine {
-	Entry(AlbumEntry),
+	Entry(FreqEntry<String>),
 	Date(String),
 }
 
@@ -47,12 +33,12 @@ impl FromStr for ParsedLine {
 			.map(|date_match| ParsedLine::Date(date_match[1].to_owned()))
 			.or_else(|| {
 				ALBUM_ENTRY_PATTERN.captures(s).map(|album_match| {
-					ParsedLine::Entry(AlbumEntry::new(
-						album_match[1].to_owned(),
+					ParsedLine::Entry(FreqEntry::new(
 						album_match
 							.get(2)
 							.map(|freq| freq.as_str().parse().expect("Parse album entry frequency"))
 							.unwrap_or(1),
+						album_match[1].to_owned(),
 					))
 				})
 			})
@@ -61,7 +47,7 @@ impl FromStr for ParsedLine {
 }
 
 struct AlbumLog {
-	entries: HashMap<String, Vec<AlbumEntry>>,
+	entries: HashMap<String, Vec<FreqEntry<String>>>,
 	current: Option<String>,
 }
 
@@ -91,20 +77,111 @@ impl AlbumLog {
 		}
 	}
 
-	fn flattened_album_entries(&self) -> impl Iterator<Item=&AlbumEntry> {
+	fn flattened_album_entries(&self) -> impl Iterator<Item=&FreqEntry<String>> {
 		self.entries.values().flatten()
 	}
 }
 
-struct RankingEntry {
-	idx: usize,
-	rank: u32,
-	album_entry: AlbumEntry,
+#[derive(PartialEq, Eq)]
+struct FreqEntry<T: Eq + Ord> {
+	freq: u32,
+	value: T,
 }
 
-impl RankingEntry {
-	fn print_entry(&self, width: usize) {
-		println!("#{:0width$} {}. {}", self.idx + 1, self.rank, self.album_entry, width = width);
+impl<T: Eq + Ord> FreqEntry<T> {
+	fn new(freq: u32, value: T) -> Self {
+		Self { freq, value }
+	}
+}
+
+impl<T: Eq + Ord> PartialOrd for FreqEntry<T> {
+	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+		Some(self.cmp(other))
+	}
+}
+
+impl<T: Eq + Ord> Ord for FreqEntry<T> {
+	fn cmp(&self, other: &Self) -> Ordering {
+		Reverse(self.freq)
+			.cmp(&Reverse(other.freq))
+			.then_with(|| self.value.cmp(&other.value))
+	}
+}
+
+impl<T: Eq + Ord + Display> Display for FreqEntry<T> {
+	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{} (x{})", self.value, self.freq)
+	}
+}
+
+
+struct RankedEntry<T: Ord + Eq> {
+	idx: u32,
+	rank: u32,
+	freq_entry: FreqEntry<T>,
+}
+
+impl<T: Ord> RankedEntry<T> {
+	fn new(idx: u32, rank: u32, freq_entry: FreqEntry<T>) -> Self {
+		Self { idx, rank, freq_entry }
+	}
+
+	fn from_freq_entries(freq_entries: impl Iterator<Item=FreqEntry<T>>) -> Vec<RankedEntry<T>> {
+		freq_entries
+			.sorted()
+			.scan(None, |maybe_rank: &mut Option<(u32, u32)>, freq_entry| {
+				let entry_rank =
+					if let Some((rank, rank_freq)) = *maybe_rank {
+						if freq_entry.freq != rank_freq {
+							*maybe_rank = Some((rank + 1, freq_entry.freq));
+							rank + 1
+						} else {
+							rank
+						}
+					} else {
+						*maybe_rank = Some((1, freq_entry.freq));
+						1
+					};
+				Some((entry_rank, freq_entry))
+			})
+			.enumerate()
+			.map(|(idx, (rank, freq_entry))| {
+				Self::new(idx as u32, rank, freq_entry)
+			})
+			.collect_vec()
+	}
+}
+
+impl<T: Ord + Eq + Display> RankedEntry<T> {
+	fn to_string(&self, width: usize) -> String {
+		format!("#{:0width$} {}. {}", self.idx + 1, self.rank, self.freq_entry, width = width)
+	}
+}
+
+impl<T: Eq + Ord + Display> Display for RankedEntry<T> {
+	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}| {}. {}", self.idx, self.rank, self.freq_entry)
+	}
+}
+
+#[derive(Default)]
+struct Counter<T: Eq + Hash> {
+	counter: HashMap<T, u32>,
+}
+
+impl<T: Eq + Ord + Hash> Counter<T> {
+	fn new() -> Self {
+		Self { counter: HashMap::new() }
+	}
+
+	fn add(&mut self, value: T, freq: u32) {
+		*self.counter.entry(value).or_default() += freq;
+	}
+
+	fn to_freq_entries(self) -> impl Iterator<Item=FreqEntry<T>> {
+		self.counter
+			.into_iter()
+			.map(|(value, freq)| FreqEntry::new(freq, value))
 	}
 }
 
@@ -117,6 +194,11 @@ fn main() -> anyhow::Result<()> {
 		}
 		_ => unreachable!(),
 	}
+}
+
+fn get_artists(album_entry: &str) -> Result<Vec<String>, ()> {
+	let (artists, _) = album_entry.split_once(ENTRY_SEPARATOR).ok_or(())?;
+	Ok(artists.split(ARTIST_JOINER).map(|s| s.trim().to_owned()).collect_vec())
 }
 
 fn prompt() -> Option<bool> {
@@ -132,6 +214,32 @@ fn prompt() -> Option<bool> {
 		"y" | "" => Some(true),
 		"n" => Some(false),
 		_ => None,
+	}
+}
+
+fn print_top<T: Eq + Ord + Display>(ranked_entries: &[RankedEntry<T>], top: usize, summary: impl Fn(u32, u32) -> String) {
+	let total = ranked_entries.iter().map(|entry| entry.freq_entry.freq).sum();
+	let unique = ranked_entries.len() as u32;
+	let mut digits = if unique > 0 { unique.ilog10() } else { 0 };
+	if 10u32.pow(digits) < unique {
+		digits += 1;
+	}
+
+	let mut iter = ranked_entries.iter().peekable();
+
+	iter
+		.by_ref()
+		.take(top)
+		.for_each(|entry| println!("{}", entry.to_string(digits as usize)));
+	println!("{}", summary(unique, total));
+
+	if iter.peek().is_some() {
+		let response = loop {
+			if let Some(response) = prompt() { break response; }
+		};
+		if response {
+			iter.for_each(|entry| println!("{}", entry.to_string(digits as usize)));
+		}
 	}
 }
 
@@ -160,59 +268,37 @@ fn process_file(path: &str) -> anyhow::Result<()> {
 				acc
 			});
 
-	let album_freq = album_freq
-		.into_iter()
-		.sorted_by_key(|(album, freq)| (Reverse(*freq), album.clone()))
-		.collect_vec();
 
-	let total_listenings: u32 = album_freq.iter().map(|(_album, freq)| *freq).sum();
-	let total_count = album_freq.len() as u32;
+	let ranked_entries =
+		RankedEntry::from_freq_entries(
+			album_freq
+				.into_iter()
+				.map(|(album, freq)| FreqEntry::new(freq, album))
+		);
 
-	let mut digits = if total_count > 0 { total_count.ilog10() } else { 0 };
-	if 10u32.pow(digits) < total_count {
-		digits += 1;
-	}
+	print_top(
+		&ranked_entries,
+		TOP_ALBUMS,
+		|unique, total| format!("{unique} albums listed, {total} albums listened"),
+	);
 
-	let ranking_entries =
-		album_freq
-			.into_iter()
-			.scan(None, |maybe_rank: &mut Option<(u32, u32)>, (album, freq)| {
-				let album_rank =
-					if let Some((rank, rank_freq)) = *maybe_rank {
-						if freq != rank_freq {
-							*maybe_rank = Some((rank + 1, freq));
-							rank + 1
-						} else {
-							rank
-						}
-					} else {
-						*maybe_rank = Some((1, freq));
-						1
-					};
-				Some((album_rank, (album, freq)))
+
+	let artist_counter =
+		ranked_entries
+			.iter()
+			.flat_map(|ranked_entry| {
+				get_artists(&ranked_entry.freq_entry.value)
+					.into_iter()
+					.flatten()
+					.map(|artist| (artist, ranked_entry.freq_entry.freq))
 			})
-			.enumerate()
-			.map(|(idx, (rank, (album, freq)))| {
-				RankingEntry { idx, rank, album_entry: AlbumEntry::new(album, freq) }
-			})
-			.collect_vec();
+			.fold(Counter::new(), |mut acc, (artist, freq)| {
+				acc.add(artist, freq);
+				acc
+			});
 
-	let mut iter = ranking_entries.into_iter().peekable();
-
-	iter
-		.by_ref()
-		.take(TOP_RANK)
-		.for_each(|entry| entry.print_entry(digits as usize));
-	println!("{total_count} albums listed, {total_listenings} albums listened");
-
-	if iter.peek().is_some() {
-		let response = loop {
-			if let Some(response) = prompt() { break response; }
-		};
-		if response {
-			iter.for_each(|entry| entry.print_entry(digits as usize));
-		}
-	}
+	let ranked_artists = RankedEntry::from_freq_entries(artist_counter.to_freq_entries());
+	print_top(&ranked_artists, TOP_ARTISTS, |unique, total| format!("{unique} artists listed, {total} artists listened"));
 
 	Ok(())
 }
